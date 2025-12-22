@@ -90,7 +90,13 @@ Automatically archived from Twitch VOD.
         print(f"{'='*60}\n")
         
         # Download
-        file_path = self.downloader.download(vod["url"], vod_id, title)
+        file_path = self.downloader.download(
+            vod["url"], 
+            vod_id, 
+            title,
+            channel_name=self.config["twitch"]["channel_name"],
+            created_at=vod["created_at"]
+        )
         if not file_path:
             print(f"[Archiver] Failed to download VOD {vod_id}")
             return False

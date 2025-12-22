@@ -115,7 +115,7 @@ class VODDownloader:
             self.progress_bar.finish()
             self.downloaded_file = d.get('filename')
     
-    def download(self, vod_url: str, vod_id: str, title: str) -> Optional[str]:
+    def download(self, vod_url: str, vod_id: str, title: str, channel_name: str = None, created_at: str = None) -> Optional[str]:
         """
         Download a Twitch VOD.
         
@@ -123,12 +123,25 @@ class VODDownloader:
             vod_url: URL to the Twitch VOD
             vod_id: Unique VOD ID (for filename)
             title: VOD title (for filename)
+            channel_name: Twitch channel name (for filename)
+            created_at: ISO timestamp of when the stream started
         
         Returns:
             Path to downloaded file, or None if failed
         """
-        safe_title = self.sanitize_filename(title)
-        output_template = str(self.download_dir / f"{vod_id}_{safe_title}.%(ext)s")
+        # Build filename like "Atrioc VOD - 12/20/2025"
+        if created_at and channel_name:
+            from datetime import datetime
+            try:
+                dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                date_str = dt.strftime("%m-%d-%Y")  # Use dashes since slashes are invalid in filenames
+            except ValueError:
+                date_str = "unknown-date"
+            filename_base = f"{channel_name} VOD - {date_str}"
+        else:
+            filename_base = self.sanitize_filename(title)
+        
+        output_template = str(self.download_dir / f"{vod_id}_{filename_base}.%(ext)s")
         
         # Check if file already exists (resume support)
         existing_file = self._find_existing_file(vod_id)
