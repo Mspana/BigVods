@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VOD Archiver Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .status-bar {
+            display: flex;
+            justify-content: space-around;
+            padding: 20px;
+            background: #f5f5f5;
+            border-bottom: 2px solid #ddd;
+        }
+        
+        .status-item {
+            text-align: center;
+        }
+        
+        .status-item .label {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 5px;
+        }
+        
+        .status-item .value {
+            font-size: 1.3em;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .status-running {
+            color: #28a745;
+        }
+        
+        .status-stopped {
+            color: #dc3545;
+        }
+        
+        .log-container {
+            padding: 20px;
+            max-height: 600px;
+            overflow-y: auto;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.9em;
+            line-height: 1.6;
+        }
+        
+        .log-entry {
+            padding: 5px 0;
+            border-bottom: 1px solid #333;
+        }
+        
+        .log-entry:last-child {
+            border-bottom: none;
+        }
+        
+        .log-info {
+            color: #4ec9b0;
+        }
+        
+        .log-error {
+            color: #f48771;
+        }
+        
+        .log-warning {
+            color: #dcdcaa;
+        }
+        
+        .log-success {
+            color: #4ec9b0;
+        }
+        
+        .controls {
+            padding: 20px;
+            background: #f5f5f5;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .refresh-info {
+            color: #666;
+            font-size: 0.9em;
+        }
+        
+        .auto-refresh {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .auto-refresh input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 40px;
+            color: #999;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .loading {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📺 VOD Archiver Dashboard</h1>
+            <p>Real-time monitoring of your Twitch VOD archiver</p>
+        </div>
+        
+        <div class="status-bar" id="statusBar">
+            <div class="status-item">
+                <div class="label">Status</div>
+                <div class="value" id="statusValue">Checking...</div>
+            </div>
+            <div class="status-item">
+                <div class="label">Last Check</div>
+                <div class="value" id="lastCheck">-</div>
+            </div>
+            <div class="status-item">
+                <div class="label">VODs Today</div>
+                <div class="value" id="vodsToday">-</div>
+            </div>
+            <div class="status-item">
+                <div class="label">Total Processed</div>
+                <div class="value" id="totalProcessed">-</div>
+            </div>
+        </div>
+        
+        <div class="vods-section" id="vodsSection" style="padding: 20px; background: #f9f9f9; border-bottom: 2px solid #ddd; max-height: 400px; overflow-y: auto;">
+            <h2 style="margin-bottom: 15px; color: #333;">Processed VODs</h2>
+            <div id="vodsList" class="empty-state">Loading...</div>
+        </div>
+        
+        <div class="log-container" id="logContainer">
+            <div class="empty-state loading">Loading logs...</div>
+        </div>
+        
+        <div class="controls">
+            <div class="refresh-info">
+                <span id="lastRefresh">Never refreshed</span>
+            </div>
+            <div class="auto-refresh">
+                <label>
+                    <input type="checkbox" id="autoRefresh" checked>
+                    Auto-refresh (30s)
+                </label>
+                <button onclick="loadLogs()" style="padding: 8px 16px; margin-left: 10px; cursor: pointer;">Refresh Now</button>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let refreshInterval = null;
+        
+        function formatLogLine(line) {
+            if (!line) return '';
+            
+            // Parse log format: "timestamp | level | message"
+            const parts = line.split(' | ');
+            let timestamp = '';
+            let level = '';
+            let message = line;
+            
+            if (parts.length >= 3) {
+                timestamp = parts[0];
+                level = parts[1];
+                message = parts.slice(2).join(' | ');
+            } else if (parts.length === 2) {
+                timestamp = parts[0];
+                message = parts[1];
+            }
+            
+            // Determine log level class
+            let levelClass = 'log-info';
+            if (level.includes('ERROR') || message.includes('Failed') || message.includes('Error')) {
+                levelClass = 'log-error';
+            } else if (level.includes('WARNING') || message.includes('Warning')) {
+                levelClass = 'log-warning';
+            } else if (message.includes('Successfully') || message.includes('complete')) {
+                levelClass = 'log-success';
+            }
+            
+            return `<div class="log-entry ${levelClass}">${escapeHtml(line)}</div>`;
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        async function loadProcessedVODs() {
+            try {
+                const response = await fetch('../processed_vods.json');
+                if (!response.ok) {
+                    document.getElementById('vodsList').innerHTML = '<div class="empty-state">No processed VODs yet</div>';
+                    document.getElementById('totalProcessed').textContent = '0';
+                    return;
+                }
+                
+                const data = await response.json();
+                let vods = [];
+                
+                // Handle both old format (array) and new format (object)
+                if (Array.isArray(data)) {
+                    vods = data.map(id => ({ twitch_id: id }));
+                } else {
+                    vods = Object.values(data);
+                }
+                
+                // Update count
+                document.getElementById('totalProcessed').textContent = vods.length;
+                
+                // Sort by stream_date (newest first), fallback to uploaded_at, then order
+                vods.sort((a, b) => {
+                    const dateA = a.stream_date || a.uploaded_at;
+                    const dateB = b.stream_date || b.uploaded_at;
+                    if (dateA && dateB) {
+                        return new Date(dateB) - new Date(dateA);
+                    }
+                    return 0;
+                });
+                
+                // Display VODs
+                const vodsList = document.getElementById('vodsList');
+                if (vods.length === 0) {
+                    vodsList.innerHTML = '<div class="empty-state">No processed VODs yet</div>';
+                    return;
+                }
+                
+                const vodsHtml = vods.map(vod => {
+                    const title = vod.title || `VOD ${vod.twitch_id}`;
+                    const youtubeId = vod.youtube_id;
+                    
+                    // Format stream date nicely (prefer stream_date, fallback to uploaded_at)
+                    let streamDate = '';
+                    const dateToUse = vod.stream_date || vod.uploaded_at;
+                    if (dateToUse) {
+                        const date = new Date(dateToUse);
+                        streamDate = date.toLocaleDateString('en-US', { 
+                            year: 'numeric', 
+                            month: 'short', 
+                            day: 'numeric'
+                        });
+                    }
+                    
+                    let linkHtml = '';
+                    if (youtubeId) {
+                        const youtubeUrl = `https://www.youtube.com/watch?v=${youtubeId}`;
+                        linkHtml = `<a href="${youtubeUrl}" target="_blank" style="color: #667eea; text-decoration: none; font-weight: 500;">${title}</a>`;
+                    } else {
+                        linkHtml = `<span style="color: #666;">${title}</span>`;
+                    }
+                    
+                    // Get thumbnail URL if YouTube ID exists
+                    let thumbnailHtml = '';
+                    if (youtubeId) {
+                        const thumbnailUrl = `https://img.youtube.com/vi/${youtubeId}/mqdefault.jpg`;
+                        thumbnailHtml = `
+                            <img src="${thumbnailUrl}" 
+                                 alt="${title}" 
+                                 style="width: 120px; height: 90px; object-fit: cover; border-radius: 4px; cursor: pointer;"
+                                 onclick="window.open('https://www.youtube.com/watch?v=${youtubeId}', '_blank')"
+                                 onerror="this.style.display='none'">
+                        `;
+                    } else {
+                        thumbnailHtml = '<div style="width: 120px; height: 90px; background: #f0f0f0; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: #999; font-size: 0.8em;">No thumbnail</div>';
+                    }
+                    
+                    return `
+                        <div style="padding: 12px; margin-bottom: 8px; background: white; border-radius: 5px; border-left: 3px solid #667eea; display: grid; grid-template-columns: auto 1fr 120px auto; gap: 15px; align-items: center;">
+                            <div style="min-width: 200px;">
+                                ${streamDate ? `
+                                    <div style="color: #999; font-size: 0.85em; margin-bottom: 4px;">Stream Date:</div>
+                                    <div style="color: #667eea; font-size: 0.9em;">${streamDate}</div>
+                                ` : `
+                                    <div style="color: #999; font-size: 0.85em; margin-bottom: 4px;">Stream Date:</div>
+                                    <div style="color: #999; font-size: 0.9em;">-</div>
+                                `}
+                            </div>
+                            <div>
+                                ${linkHtml}
+                                <div style="font-size: 0.85em; color: #999; margin-top: 6px;">
+                                    Twitch ID: <strong>${vod.twitch_id}</strong>
+                                </div>
+                            </div>
+                            ${thumbnailHtml}
+                            <div style="text-align: right; min-width: 120px;">
+                                ${youtubeId ? `<span style="color: #28a745; font-size: 0.9em;">✓ Uploaded</span>` : '<span style="color: #999; font-size: 0.9em;">No YouTube link</span>'}
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+                
+                vodsList.innerHTML = vodsHtml;
+            } catch (error) {
+                document.getElementById('vodsList').innerHTML = `<div class="empty-state log-error">Error loading VODs: ${error.message}</div>`;
+                document.getElementById('totalProcessed').textContent = '-';
+            }
+        }
+        
+        async function loadProcessedCount() {
+            // This is now handled by loadProcessedVODs
+            await loadProcessedVODs();
+        }
+        
+        async function loadLogs() {
+            try {
+                const response = await fetch('../archiver.log');
+                if (!response.ok) {
+                    throw new Error('Log file not found');
+                }
+                
+                const text = await response.text();
+                const lines = text.split('\n').filter(line => line.trim());
+                const recentLines = lines.slice(-50); // Last 50 lines
+                
+                const logContainer = document.getElementById('logContainer');
+                if (recentLines.length === 0) {
+                    logContainer.innerHTML = '<div class="empty-state">No log entries yet</div>';
+                } else {
+                    logContainer.innerHTML = recentLines.map(formatLogLine).join('');
+                    // Scroll to bottom
+                    logContainer.scrollTop = logContainer.scrollHeight;
+                }
+                
+                // Update status info
+                updateStatusInfo(lines);
+                
+                // Also update processed VODs list
+                loadProcessedVODs();
+                
+                document.getElementById('lastRefresh').textContent = 
+                    `Last refreshed: ${new Date().toLocaleTimeString()}`;
+            } catch (error) {
+                document.getElementById('logContainer').innerHTML = 
+                    `<div class="empty-state log-error">Error loading logs: ${error.message}<br>Make sure the log file exists and you're opening this from the BigVods folder.</div>`;
+            }
+        }
+        
+        function updateStatusInfo(lines) {
+            // Parse status from logs
+            const recent = lines.slice(-100);
+            let lastCheck = '-';
+            let vodsToday = 0;
+            
+            for (const line of recent.reverse()) {
+                if (line.includes('Starting check cycle')) {
+                    const match = line.match(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
+                    if (match) {
+                        lastCheck = match[1];
+                        break;
+                    }
+                }
+                if (line.includes('Successfully archived VOD')) {
+                    vodsToday++;
+                }
+            }
+            
+            document.getElementById('lastCheck').textContent = lastCheck;
+            document.getElementById('vodsToday').textContent = vodsToday;
+            
+            // Check if running (look for recent activity)
+            const now = new Date();
+            const hasRecentActivity = recent.some(line => {
+                const match = line.match(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
+                if (match) {
+                    const logTime = new Date(match[1]);
+                    const diffMinutes = (now - logTime) / (1000 * 60);
+                    return diffMinutes < 30; // Activity in last 30 minutes
+                }
+                return false;
+            });
+            
+            const statusEl = document.getElementById('statusValue');
+            if (hasRecentActivity) {
+                statusEl.textContent = 'RUNNING';
+                statusEl.className = 'value status-running';
+            } else {
+                statusEl.textContent = 'IDLE/STOPPED';
+                statusEl.className = 'value status-stopped';
+            }
+            
+            // Get total processed count from processed_vods.json
+            loadProcessedCount();
+        }
+        
+        function setupAutoRefresh() {
+            const checkbox = document.getElementById('autoRefresh');
+            if (checkbox.checked) {
+                if (refreshInterval) clearInterval(refreshInterval);
+                refreshInterval = setInterval(loadLogs, 30000); // 30 seconds
+            } else {
+                if (refreshInterval) {
+                    clearInterval(refreshInterval);
+                    refreshInterval = null;
+                }
+            }
+        }
+        
+        // Initial load
+        loadLogs();
+        loadProcessedVODs();
+        
+        // Setup auto-refresh
+        document.getElementById('autoRefresh').addEventListener('change', setupAutoRefresh);
+        setupAutoRefresh();
+    </script>
+</body>
+</html>

@@ -18,8 +18,11 @@ from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
 
 
-# OAuth scopes needed for uploading videos
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+# OAuth scopes needed for uploading videos and managing playlists
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    "https://www.googleapis.com/auth/youtube.force-ssl"
+]
 
 
 def format_size(bytes_val: float) -> str:
@@ -104,10 +107,12 @@ class YouTubeUploader:
     def __init__(
         self,
         client_secrets_file: str = "client_secrets.json",
-        credentials_file: str = "youtube_credentials.json"
+        credentials_file: str = "youtube_credentials.json",
+        playlist_id_file: str = "youtube_playlist_id.txt"
     ):
         self.client_secrets_file = client_secrets_file
         self.credentials_file = credentials_file
+        self.playlist_id_file = playlist_id_file
         self.youtube = None
     
     def authenticate(self) -> bool:
@@ -171,7 +176,8 @@ class YouTubeUploader:
         title: str,
         description: str = "",
         privacy_status: str = "unlisted",
-        tags: Optional[list[str]] = None
+        tags: Optional[list[str]] = None,
+        playlist_id: Optional[str] = None
     ) -> Optional[str]:
         """
         Upload a video to YouTube.
@@ -253,6 +259,11 @@ class YouTubeUploader:
             video_id = response["id"]
             print(f"[YouTube] Upload complete! Video ID: {video_id}")
             print(f"[YouTube] URL: https://www.youtube.com/watch?v={video_id}")
+            
+            # Add to playlist if specified
+            if playlist_id:
+                self.add_to_playlist(video_id, playlist_id)
+            
             return video_id
             
         except HttpError as e:
@@ -272,6 +283,125 @@ class YouTubeUploader:
             progress_bar.finish()
             print(f"[YouTube] Upload failed: {e}")
             return None
+    
+    def get_or_create_playlist(self, playlist_title: str, playlist_description: str = "") -> Optional[str]:
+        """
+        Get existing playlist ID or create a new one.
+        
+        Args:
+            playlist_title: Title for the playlist
+            playlist_description: Description for the playlist
+        
+        Returns:
+            Playlist ID if successful, None otherwise
+        """
+        if not self.youtube:
+            if not self.authenticate():
+                return None
+        
+        # Check if we have a saved playlist ID
+        if os.path.exists(self.playlist_id_file):
+            try:
+                with open(self.playlist_id_file, "r") as f:
+                    saved_id = f.read().strip()
+                    if saved_id:
+                        # Verify the playlist still exists
+                        try:
+                            response = self.youtube.playlists().list(
+                                part="id,snippet",
+                                id=saved_id,
+                                maxResults=1
+                            ).execute()
+                            
+                            if response.get("items"):
+                                print(f"[YouTube] Using existing playlist: {playlist_title}")
+                                return saved_id
+                        except HttpError:
+                            # Playlist doesn't exist or we don't have access, create new one
+                            pass
+            except Exception:
+                pass
+        
+        # Create a new playlist
+        print(f"[YouTube] Creating playlist: {playlist_title}")
+        try:
+            body = {
+                "snippet": {
+                    "title": playlist_title,
+                    "description": playlist_description,
+                    "privacyStatus": "unlisted"  # Make it easy to find but not public
+                },
+                "status": {
+                    "privacyStatus": "unlisted"
+                }
+            }
+            
+            response = self.youtube.playlists().insert(
+                part="snippet,status",
+                body=body
+            ).execute()
+            
+            playlist_id = response["id"]
+            
+            # Save the playlist ID for future use
+            with open(self.playlist_id_file, "w") as f:
+                f.write(playlist_id)
+            
+            print(f"[YouTube] Playlist created! ID: {playlist_id}")
+            print(f"[YouTube] Playlist URL: https://www.youtube.com/playlist?list={playlist_id}")
+            return playlist_id
+            
+        except HttpError as e:
+            error_content = json.loads(e.content.decode())
+            error_reason = error_content.get("error", {}).get("errors", [{}])[0].get("reason", "unknown")
+            print(f"[YouTube] Failed to create playlist: {error_reason}")
+            return None
+        except Exception as e:
+            print(f"[YouTube] Failed to create playlist: {e}")
+            return None
+    
+    def add_to_playlist(self, video_id: str, playlist_id: str) -> bool:
+        """
+        Add a video to a playlist.
+        
+        Args:
+            video_id: YouTube video ID
+            playlist_id: Playlist ID to add the video to
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.youtube:
+            if not self.authenticate():
+                return False
+        
+        try:
+            body = {
+                "snippet": {
+                    "playlistId": playlist_id,
+                    "resourceId": {
+                        "kind": "youtube#video",
+                        "videoId": video_id
+                    }
+                }
+            }
+            
+            self.youtube.playlistItems().insert(
+                part="snippet",
+                body=body
+            ).execute()
+            
+            print(f"[YouTube] Added video to playlist")
+            return True
+            
+        except HttpError as e:
+            error_content = json.loads(e.content.decode())
+            error_reason = error_content.get("error", {}).get("errors", [{}])[0].get("reason", "unknown")
+            print(f"[YouTube] Failed to add video to playlist: {error_reason}")
+            return False
+        except Exception as e:
+            print(f"[YouTube] Failed to add video to playlist: {e}")
+            return False
 
 
 if __name__ == "__main__":

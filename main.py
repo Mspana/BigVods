@@ -6,12 +6,48 @@ Main orchestration script that monitors for new VODs, downloads, and uploads the
 import json
 import time
 import os
+import sys
+import logging
 from datetime import datetime
 from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
 from twitch_api import TwitchAPI
 from downloader import VODDownloader
 from youtube_upload import YouTubeUploader
+from web.dashboard_server import DashboardServer
+
+
+def setup_logging(log_file: str = "archiver.log") -> logging.Logger:
+    """Set up logging to both file and console."""
+    logger = logging.getLogger("VODArchiver")
+    logger.setLevel(logging.INFO)
+    
+    # File handler with rotation (max 5MB, keep 3 backups)
+    file_handler = RotatingFileHandler(
+        log_file, 
+        maxBytes=5*1024*1024,  # 5MB
+        backupCount=3,
+        encoding='utf-8'
+    )
+    file_handler.setLevel(logging.INFO)
+    file_format = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
+    file_handler.setFormatter(file_format)
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_format = logging.Formatter('%(message)s')
+    console_handler.setFormatter(console_format)
+    
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+
+# Global logger
+log = setup_logging()
 
 
 class VODArchiver:
@@ -37,28 +73,74 @@ class VODArchiver:
         
         # Load processed VODs
         self.processed_vods = self._load_processed()
+        
+        # Migrate old format to new format if needed
+        self._migrate_processed_format()
+        
+        # Initialize playlist (will be created on first use)
+        self.playlist_id = None
+    
+
+
     
     def _load_config(self) -> dict:
         """Load configuration from JSON file."""
         with open(self.config_path) as f:
             return json.load(f)
     
-    def _load_processed(self) -> set:
-        """Load set of already processed VOD IDs."""
+    def _load_processed(self) -> dict:
+        """Load dictionary of processed VODs with metadata."""
         try:
             with open(self.processed_file) as f:
-                return set(json.load(f))
+                data = json.load(f)
+                # Handle old format (list of IDs) for backward compatibility
+                if isinstance(data, list):
+                    # Convert old format to new format
+                    return {vod_id: {"twitch_id": vod_id} for vod_id in data}
+                # New format (dict mapping VOD ID to metadata)
+                return data
         except (FileNotFoundError, json.JSONDecodeError):
-            return set()
+            return {}
     
     def _save_processed(self):
-        """Save processed VOD IDs to file."""
+        """Save processed VODs to file."""
         with open(self.processed_file, "w") as f:
-            json.dump(list(self.processed_vods), f, indent=2)
+            json.dump(self.processed_vods, f, indent=2)
     
-    def _mark_processed(self, vod_id: str):
-        """Mark a VOD as processed and save."""
-        self.processed_vods.add(vod_id)
+    def _migrate_processed_format(self):
+        """Migrate old format (list) to new format (dict) if needed and save immediately."""
+        # Check if file needs migration by reading it directly
+        try:
+            with open(self.processed_file) as f:
+                raw_data = json.load(f)
+                # If it's still in old format (list), migrate it
+                if isinstance(raw_data, list):
+                    log.info(f"Migrating {len(raw_data)} VODs from old format to new format...")
+                    # Convert to new format
+                    self.processed_vods = {
+                        vod_id: {
+                            "twitch_id": vod_id,
+                            "youtube_id": None,  # Can't retroactively get this
+                            "title": None,
+                            "uploaded_at": None
+                        }
+                        for vod_id in raw_data
+                    }
+                    # Save immediately
+                    self._save_processed()
+                    log.info("Migration complete. Old VODs won't have YouTube links.")
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass  # File doesn't exist or is already in new format
+    
+    def _mark_processed(self, vod_id: str, youtube_id: str = None, title: str = None, stream_date: str = None):
+        """Mark a VOD as processed and save with metadata."""
+        self.processed_vods[vod_id] = {
+            "twitch_id": vod_id,
+            "youtube_id": youtube_id,
+            "title": title,
+            "stream_date": stream_date,  # When the Twitch stream happened
+            "uploaded_at": datetime.now().isoformat()  # When we uploaded to YouTube
+        }
         self._save_processed()
     
     def _format_description(self, vod: dict) -> str:
@@ -83,11 +165,11 @@ Automatically archived from Twitch VOD.
         vod_id = vod["id"]
         title = vod["title"]
         
-        print(f"\n{'='*60}")
-        print(f"Processing VOD: {title}")
-        print(f"ID: {vod_id}")
-        print(f"Duration: {vod['duration']}")
-        print(f"{'='*60}\n")
+        log.info("=" * 60)
+        log.info(f"Processing VOD: {title}")
+        log.info(f"ID: {vod_id}")
+        log.info(f"Duration: {vod['duration']}")
+        log.info("=" * 60)
         
         # Download
         file_path = self.downloader.download(
@@ -98,7 +180,7 @@ Automatically archived from Twitch VOD.
             created_at=vod["created_at"]
         )
         if not file_path:
-            print(f"[Archiver] Failed to download VOD {vod_id}")
+            log.error(f"Failed to download VOD {vod_id}")
             return False
         
         # Upload to YouTube
@@ -107,11 +189,12 @@ Automatically archived from Twitch VOD.
             title=title,
             description=self._format_description(vod),
             privacy_status=self.config["youtube"]["privacy_status"],
-            tags=["Twitch", "VOD", "Archive", self.config["twitch"]["channel_name"]]
+            tags=["Twitch", "VOD", "Archive", self.config["twitch"]["channel_name"]],
+            playlist_id=self.playlist_id
         )
         
         if not video_id:
-            print(f"[Archiver] Failed to upload VOD {vod_id}")
+            log.error(f"Failed to upload VOD {vod_id}")
             # Keep the downloaded file for retry
             return False
         
@@ -119,14 +202,14 @@ Automatically archived from Twitch VOD.
         if self.config["settings"]["delete_after_upload"]:
             self.downloader.delete(file_path)
         
-        self._mark_processed(vod_id)
-        print(f"[Archiver] Successfully archived VOD {vod_id}")
+        self._mark_processed(vod_id, youtube_id=video_id, title=title)
+        log.info(f"Successfully archived VOD {vod_id} -> YouTube: {video_id}")
         return True
     
     def check_for_new_vods(self) -> list[dict]:
         """Check for new VODs that haven't been processed yet."""
         channel = self.config["twitch"]["channel_name"]
-        print(f"\n[Archiver] Checking for new VODs from {channel}...")
+        log.info(f"Checking for new VODs from {channel}...")
         
         vods = self.twitch.get_channel_vods(channel, limit=10)
         
@@ -136,9 +219,9 @@ Automatically archived from Twitch VOD.
         ]
         
         if new_vods:
-            print(f"[Archiver] Found {len(new_vods)} new VOD(s)")
+            log.info(f"Found {len(new_vods)} new VOD(s)")
         else:
-            print("[Archiver] No new VODs found")
+            log.info("No new VODs found")
         
         return new_vods
     
@@ -155,15 +238,24 @@ Automatically archived from Twitch VOD.
         
         # Authenticate YouTube upfront
         if not self.uploader.authenticate():
-            print("[Archiver] YouTube authentication failed, skipping this cycle")
+            log.error("YouTube authentication failed, skipping this cycle")
             return 0
+        
+        # Get or create playlist for this channel
+        if not self.playlist_id:
+            channel_name = self.config["twitch"]["channel_name"]
+            playlist_title = f"{channel_name} VOD Archive"
+            playlist_description = f"Automatically archived Twitch VODs from {channel_name}"
+            self.playlist_id = self.uploader.get_or_create_playlist(playlist_title, playlist_description)
+            if not self.playlist_id:
+                log.warning("Could not create/get playlist, videos will still be uploaded")
         
         success_count = 0
         for vod in new_vods:
             if self.process_vod(vod):
                 success_count += 1
             else:
-                print(f"[Archiver] Stopping due to failure. Will retry next cycle.")
+                log.warning("Stopping due to failure. Will retry next cycle.")
                 break
         
         return success_count
@@ -171,37 +263,42 @@ Automatically archived from Twitch VOD.
     def run_loop(self):
         """Run the archiver in a continuous loop."""
         poll_interval = self.config["settings"]["poll_interval_minutes"]
+        dashboard_port = self.config.get("settings", {}).get("dashboard_port", 8000)
         
-        print(f"\n{'#'*60}")
-        print(f"  Twitch VOD Archiver")
-        print(f"  Channel: {self.config['twitch']['channel_name']}")
-        print(f"  Poll interval: {poll_interval} minutes")
-        print(f"{'#'*60}\n")
+        log.info("#" * 60)
+        log.info("  Twitch VOD Archiver")
+        log.info(f"  Channel: {self.config['twitch']['channel_name']}")
+        log.info(f"  Poll interval: {poll_interval} minutes")
+        log.info("#" * 60)
+        
+        # Start dashboard server
+        dashboard = DashboardServer(port=dashboard_port)
+        dashboard.start()
+        log.info(f"Dashboard available at: http://localhost:{dashboard_port}/web/dashboard.html")
         
         # Authenticate YouTube at startup
-        print("[Archiver] Authenticating with YouTube...")
+        log.info("Authenticating with YouTube...")
         if not self.uploader.authenticate():
-            print("[Archiver] Warning: YouTube auth failed. Will retry later.")
+            log.warning("YouTube auth failed. Will retry later.")
         
         while True:
             try:
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"\n[{timestamp}] Starting check cycle...")
+                log.info("Starting check cycle...")
                 
                 processed = self.run_once()
                 
                 if processed > 0:
-                    print(f"[Archiver] Processed {processed} VOD(s) this cycle")
+                    log.info(f"Processed {processed} VOD(s) this cycle")
                 
-                print(f"[Archiver] Sleeping for {poll_interval} minutes...")
+                log.info(f"Sleeping for {poll_interval} minutes...")
                 time.sleep(poll_interval * 60)
                 
             except KeyboardInterrupt:
-                print("\n[Archiver] Shutting down...")
+                log.info("Shutting down...")
                 break
             except Exception as e:
-                print(f"[Archiver] Error in main loop: {e}")
-                print(f"[Archiver] Retrying in {poll_interval} minutes...")
+                log.exception(f"Error in main loop: {e}")
+                log.info(f"Retrying in {poll_interval} minutes...")
                 time.sleep(poll_interval * 60)
 
 
@@ -226,7 +323,7 @@ def main():
     
     if args.once:
         count = archiver.run_once()
-        print(f"\nProcessed {count} VOD(s)")
+        log.info(f"Processed {count} VOD(s)")
     else:
         archiver.run_loop()
 
