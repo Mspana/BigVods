@@ -181,6 +181,8 @@ Automatically archived from Twitch VOD.
         )
         if not file_path:
             log.error(f"Failed to download VOD {vod_id}")
+            # Clean up any partial downloads
+            self._cleanup_partial_downloads(vod_id)
             return False
         
         # Upload to YouTube
@@ -202,9 +204,26 @@ Automatically archived from Twitch VOD.
         if self.config["settings"]["delete_after_upload"]:
             self.downloader.delete(file_path)
         
-        self._mark_processed(vod_id, youtube_id=video_id, title=title)
+        self._mark_processed(vod_id, youtube_id=video_id, title=title, stream_date=vod.get("created_at"))
         log.info(f"Successfully archived VOD {vod_id} -> YouTube: {video_id}")
         return True
+    
+    def _cleanup_partial_downloads(self, vod_id: str):
+        """Clean up partial download files for a VOD."""
+        downloads_dir = Path(self.config["settings"]["download_dir"])
+        if not downloads_dir.exists():
+            return
+        
+        # Find all files related to this VOD
+        for file_path in downloads_dir.iterdir():
+            if file_path.name.startswith(f"{vod_id}_"):
+                try:
+                    # Only delete partial files (not completed downloads)
+                    if file_path.suffix in ['.part', '.ytdl'] or '.part-Frag' in file_path.name:
+                        file_path.unlink()
+                        log.info(f"Cleaned up partial download: {file_path.name}")
+                except Exception as e:
+                    log.warning(f"Failed to clean up {file_path.name}: {e}")
     
     def check_for_new_vods(self) -> list[dict]:
         """Check for new VODs that haven't been processed yet."""
@@ -213,10 +232,19 @@ Automatically archived from Twitch VOD.
         
         vods = self.twitch.get_channel_vods(channel, limit=10)
         
-        new_vods = [
-            vod for vod in vods 
-            if vod["id"] not in self.processed_vods
-        ]
+        new_vods = []
+        for vod in vods:
+            vod_id = vod["id"]
+            if vod_id not in self.processed_vods:
+                new_vods.append(vod)
+            else:
+                # Log why it's being skipped
+                processed_info = self.processed_vods[vod_id]
+                youtube_id = processed_info.get("youtube_id")
+                if youtube_id:
+                    log.info(f"Skipping VOD {vod_id} - already uploaded to YouTube: {youtube_id}")
+                else:
+                    log.info(f"Skipping VOD {vod_id} - already marked as processed")
         
         if new_vods:
             log.info(f"Found {len(new_vods)} new VOD(s)")
@@ -276,10 +304,8 @@ Automatically archived from Twitch VOD.
         dashboard.start()
         log.info(f"Dashboard available at: http://localhost:{dashboard_port}/web/dashboard.html")
         
-        # Authenticate YouTube at startup
-        log.info("Authenticating with YouTube...")
-        if not self.uploader.authenticate():
-            log.warning("YouTube auth failed. Will retry later.")
+        # Authenticate YouTube at startup (non-blocking - will retry in first cycle)
+        log.info("YouTube authentication will be attempted during first check cycle")
         
         while True:
             try:

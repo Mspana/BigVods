@@ -7,6 +7,7 @@ import os
 import threading
 import http.server
 import socketserver
+import json
 from pathlib import Path
 import logging
 
@@ -23,6 +24,178 @@ class DashboardServer:
     
     class LogFileHandler(http.server.SimpleHTTPRequestHandler):
         """Custom handler that serves log files with proper MIME type and CORS."""
+        
+        def translate_path(self, path):
+            """Override to intercept API paths before file translation."""
+            # Check for API endpoints - don't translate them to file paths
+            parsed_path = path.split('?')[0].strip()
+            if parsed_path.startswith('/api/'):
+                return parsed_path  # Return as-is for API endpoints
+            # Default translation for file paths
+            return super().translate_path(path)
+        
+        def do_GET(self):
+            """Handle GET requests, including custom endpoints."""
+            # Handle custom endpoints (check before file serving)
+            parsed_path = self.path.split('?')[0].strip()  # Remove query string and whitespace
+            
+            # Check for API endpoints first
+            if parsed_path == '/api/authenticate':
+                self.handle_authenticate()
+                return
+            elif parsed_path == '/api/status':
+                self.handle_status()
+                return
+            elif parsed_path == '/api/restart':
+                self.handle_restart()
+                return
+            elif parsed_path.startswith('/api/'):
+                # Other API endpoints that don't exist
+                self.send_response(404)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "API endpoint not found"}).encode())
+                return
+            
+            # Default file serving for non-API paths
+            try:
+                super().do_GET()
+            except Exception as e:
+                # If file serving fails, send 404
+                self.send_error(404, f"File not found: {e}")
+        
+        def do_POST(self):
+            """Handle POST requests for API endpoints."""
+            parsed_path = self.path.split('?')[0].strip()
+            if parsed_path == '/api/authenticate':
+                self.handle_authenticate()
+                return
+            elif parsed_path == '/api/status':
+                self.handle_status()
+                return
+            elif parsed_path == '/api/restart':
+                self.handle_restart()
+                return
+            elif parsed_path.startswith('/api/'):
+                self.send_response(404)
+                self.send_header('Content-type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "API endpoint not found"}).encode())
+                return
+            
+            self.send_error(404, "Not Found")
+        
+        def handle_authenticate(self):
+            """Handle authentication request."""
+            import subprocess
+            import sys
+            from pathlib import Path
+            
+            try:
+                # Run authentication script
+                project_root = Path(__file__).parent.parent
+                script_path = project_root / "scripts" / "authenticate_youtube.py"
+                
+                # Run in background so it doesn't block
+                subprocess.Popen(
+                    [sys.executable, str(script_path)],
+                    cwd=str(project_root),
+                    creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
+                )
+                
+                response_data = {"status": "success", "message": "Authentication window opened. Please complete the OAuth flow in the browser window."}
+            except Exception as e:
+                response_data = {"status": "error", "message": str(e)}
+            
+            # Send JSON response
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps(response_data).encode('utf-8'))
+        
+        def handle_status(self):
+            """Handle status check request."""
+            import subprocess
+            import shutil
+            from pathlib import Path
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            
+            # Check if Python process is running
+            try:
+                result = subprocess.run(
+                    ["powershell", "-Command", "Get-Process python -ErrorAction SilentlyContinue | Where-Object {$_.Path -like '*BigVods*'} | Measure-Object | Select-Object -ExpandProperty Count"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                is_running = int(result.stdout.strip()) > 0
+            except:
+                is_running = False
+            
+            # Check disk space
+            try:
+                project_root = Path(__file__).parent.parent
+                downloads_dir = project_root / "downloads"
+                downloads_dir.mkdir(exist_ok=True)
+                
+                stat = shutil.disk_usage(downloads_dir)
+                free_gb = stat.free / (1024 ** 3)
+                total_gb = stat.total / (1024 ** 3)
+                used_gb = stat.used / (1024 ** 3)
+                
+                # Check if we have at least 5GB free
+                has_space = free_gb >= 5.0
+                space_status = "OK" if has_space else "LOW"
+            except Exception as e:
+                free_gb = 0
+                total_gb = 0
+                used_gb = 0
+                has_space = False
+                space_status = "UNKNOWN"
+            
+            response = {
+                "running": is_running,
+                "disk_space": {
+                    "free_gb": round(free_gb, 2),
+                    "total_gb": round(total_gb, 2),
+                    "used_gb": round(used_gb, 2),
+                    "has_space": has_space,
+                    "status": space_status
+                }
+            }
+            self.wfile.write(json.dumps(response).encode())
+        
+        def handle_restart(self):
+            """Handle restart request - restarts the scheduled task."""
+            import subprocess
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            
+            try:
+                # Stop and restart the scheduled task
+                subprocess.run(
+                    ["powershell", "-Command", "Stop-ScheduledTask -TaskName 'TwitchVODArchiver' -ErrorAction SilentlyContinue"],
+                    timeout=5
+                )
+                subprocess.run(
+                    ["powershell", "-Command", "Start-Sleep -Seconds 2; Start-ScheduledTask -TaskName 'TwitchVODArchiver'"],
+                    timeout=10
+                )
+                response = {"status": "success", "message": "Archiver restarted. It will pick up new credentials on next check."}
+            except Exception as e:
+                response = {"status": "error", "message": str(e)}
+            
+            self.wfile.write(json.dumps(response).encode())
         
         def end_headers(self):
             # Add CORS headers for local development

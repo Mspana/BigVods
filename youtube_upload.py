@@ -7,6 +7,7 @@ import os
 import sys
 import json
 import time
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -21,8 +22,11 @@ from googleapiclient.errors import HttpError
 # OAuth scopes needed for uploading videos and managing playlists
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
-    "https://www.googleapis.com/auth/youtube.force-ssl"
+    "https://www.googleapis.com/auth/youtube.force-ssl",
 ]
+
+# Use the same logger hierarchy as the main archiver
+log = logging.getLogger("VODArchiver.YouTube")
 
 
 def format_size(bytes_val: float) -> str:
@@ -132,42 +136,68 @@ class YouTubeUploader:
                     self.credentials_file, SCOPES
                 )
             except Exception as e:
-                print(f"[YouTube] Failed to load credentials: {e}")
+                log.error(f"[YouTube] Failed to load credentials: {e}")
         
         # Refresh or get new credentials
         if not credentials or not credentials.valid:
             if credentials and credentials.expired and credentials.refresh_token:
-                print("[YouTube] Refreshing expired credentials...")
+                log.info("[YouTube] Refreshing expired credentials...")
                 try:
                     credentials.refresh(Request())
                 except Exception as e:
-                    print(f"[YouTube] Failed to refresh: {e}")
+                    log.error(f"[YouTube] Failed to refresh credentials: {e}")
                     credentials = None
             
             if not credentials:
                 if not os.path.exists(self.client_secrets_file):
-                    print(f"[YouTube] Error: {self.client_secrets_file} not found")
-                    print("[YouTube] Download from Google Cloud Console")
+                    log.error(f"[YouTube] Error: {self.client_secrets_file} not found")
+                    log.error("[YouTube] Download OAuth client secrets JSON from Google Cloud Console.")
                     return False
                 
-                print("[YouTube] Opening browser for authentication...")
+                # Check if we're running in a background service (no TTY)
+                if not sys.stdout.isatty():
+                    log.error("[YouTube] Cannot open browser in background service.")
+                    log.error("[YouTube] Please run 'python scripts/authenticate_youtube.py' interactively first.")
+                    return False
+                
+                log.info("[YouTube] Opening browser for authentication...")
                 flow = InstalledAppFlow.from_client_secrets_file(
                     self.client_secrets_file, SCOPES
                 )
                 credentials = flow.run_local_server(port=0)
             
             # Save credentials for next time
-            with open(self.credentials_file, "w") as f:
-                f.write(credentials.to_json())
-            print(f"[YouTube] Credentials saved to {self.credentials_file}")
+            try:
+                with open(self.credentials_file, "w") as f:
+                    f.write(credentials.to_json())
+                log.info(f"[YouTube] Credentials saved to {self.credentials_file}")
+            except Exception as e:
+                log.error(f"[YouTube] Failed to save credentials: {e}")
+        
+        # Warn if scopes on the stored credentials don't match what we expect
+        try:
+            current_scopes = set(credentials.scopes or [])
+            required_scopes = set(SCOPES)
+            missing_scopes = required_scopes - current_scopes
+            if missing_scopes:
+                log.warning(
+                    f"[YouTube] Stored credentials are missing some scopes "
+                    f"(missing: {', '.join(sorted(missing_scopes))}). "
+                    f"Playlist operations may fail. To fix, delete "
+                    f"'{self.credentials_file}' and re-run "
+                    f"'python scripts/authenticate_youtube.py'."
+                )
+        except Exception:
+            # Don't let scope inspection break authentication
+            pass
         
         # Build the YouTube API client
         try:
             self.youtube = build("youtube", "v3", credentials=credentials)
-            print("[YouTube] Authenticated successfully")
+            log.info("[YouTube] Authenticated successfully")
             return True
         except Exception as e:
-            print(f"[YouTube] Failed to build API client: {e}")
+            log.error(f"[YouTube] Failed to build API client: {e}")
             return False
     
     def upload(
@@ -198,7 +228,7 @@ class YouTubeUploader:
         
         # Validate file exists
         if not os.path.exists(video_path):
-            print(f"[YouTube] Error: Video file not found: {video_path}")
+            log.error(f"[YouTube] Error: Video file not found: {video_path}")
             return None
         
         # Get file size for progress tracking
@@ -208,9 +238,9 @@ class YouTubeUploader:
         title = title[:100]
         description = description[:5000]
         
-        print(f"[YouTube] Uploading: {title}")
-        print(f"[YouTube] File: {video_path} ({format_size(file_size)})")
-        print(f"[YouTube] Privacy: {privacy_status}")
+        log.info(f"[YouTube] Uploading: {title}")
+        log.info(f"[YouTube] File: {video_path} ({format_size(file_size)})")
+        log.info(f"[YouTube] Privacy: {privacy_status}")
         
         body = {
             "snippet": {
@@ -257,8 +287,8 @@ class YouTubeUploader:
             progress_bar.finish()
             
             video_id = response["id"]
-            print(f"[YouTube] Upload complete! Video ID: {video_id}")
-            print(f"[YouTube] URL: https://www.youtube.com/watch?v={video_id}")
+            log.info(f"[YouTube] Upload complete! Video ID: {video_id}")
+            log.info(f"[YouTube] URL: https://www.youtube.com/watch?v={video_id}")
             
             # Add to playlist if specified
             if playlist_id:
@@ -268,20 +298,35 @@ class YouTubeUploader:
             
         except HttpError as e:
             progress_bar.finish()
-            error_content = json.loads(e.content.decode())
-            error_reason = error_content.get("error", {}).get("errors", [{}])[0].get("reason", "unknown")
+            error_reason = "unknown"
+            error_message = str(e)
+            try:
+                error_content = json.loads(e.content.decode())
+                error_info = error_content.get("error", {})
+                error_reason = error_info.get("errors", [{}])[0].get("reason", "unknown")
+                error_message = error_info.get("message", error_message)
+            except Exception:
+                # Fall back to basic info
+                error_content = None
             
             if error_reason == "quotaExceeded":
-                print("[YouTube] Error: Daily quota exceeded. Try again tomorrow.")
+                log.error("[YouTube] Error: Daily quota exceeded. Try again tomorrow.")
             elif error_reason == "uploadLimitExceeded":
-                print("[YouTube] Error: Upload limit exceeded.")
+                log.error("[YouTube] Error: Upload limit exceeded.")
             else:
-                print(f"[YouTube] API Error: {e}")
+                log.error(
+                    f"[YouTube] API Error during upload "
+                    f"(reason={error_reason}, message={error_message})"
+                )
+            
+            # Log full error payload at debug level for deeper troubleshooting
+            if error_content is not None:
+                log.debug(f"[YouTube] Full error response: {json.dumps(error_content)}")
             return None
             
         except Exception as e:
             progress_bar.finish()
-            print(f"[YouTube] Upload failed: {e}")
+            log.error(f"[YouTube] Upload failed with unexpected error: {e}")
             return None
     
     def get_or_create_playlist(self, playlist_title: str, playlist_description: str = "") -> Optional[str]:
@@ -310,20 +355,20 @@ class YouTubeUploader:
                             response = self.youtube.playlists().list(
                                 part="id,snippet",
                                 id=saved_id,
-                                maxResults=1
+                                maxResults=1,
                             ).execute()
                             
                             if response.get("items"):
-                                print(f"[YouTube] Using existing playlist: {playlist_title}")
+                                log.info(f"[YouTube] Using existing playlist: {playlist_title}")
                                 return saved_id
-                        except HttpError:
+                        except HttpError as e:
                             # Playlist doesn't exist or we don't have access, create new one
-                            pass
-            except Exception:
-                pass
+                            log.warning(f"[YouTube] Saved playlist ID is not usable, will create a new playlist: {e}")
+            except Exception as e:
+                log.warning(f"[YouTube] Failed to read saved playlist ID: {e}")
         
         # Create a new playlist
-        print(f"[YouTube] Creating playlist: {playlist_title}")
+        log.info(f"[YouTube] Creating playlist: {playlist_title}")
         try:
             body = {
                 "snippet": {
@@ -338,7 +383,7 @@ class YouTubeUploader:
             
             response = self.youtube.playlists().insert(
                 part="snippet,status",
-                body=body
+                body=body,
             ).execute()
             
             playlist_id = response["id"]
@@ -347,17 +392,30 @@ class YouTubeUploader:
             with open(self.playlist_id_file, "w") as f:
                 f.write(playlist_id)
             
-            print(f"[YouTube] Playlist created! ID: {playlist_id}")
-            print(f"[YouTube] Playlist URL: https://www.youtube.com/playlist?list={playlist_id}")
+            log.info(f"[YouTube] Playlist created! ID: {playlist_id}")
+            log.info(f"[YouTube] Playlist URL: https://www.youtube.com/playlist?list={playlist_id}")
             return playlist_id
             
         except HttpError as e:
-            error_content = json.loads(e.content.decode())
-            error_reason = error_content.get("error", {}).get("errors", [{}])[0].get("reason", "unknown")
-            print(f"[YouTube] Failed to create playlist: {error_reason}")
+            error_reason = "unknown"
+            error_message = str(e)
+            try:
+                error_content = json.loads(e.content.decode())
+                error_info = error_content.get("error", {})
+                error_reason = error_info.get("errors", [{}])[0].get("reason", "unknown")
+                error_message = error_info.get("message", error_message)
+            except Exception:
+                error_content = None
+            
+            log.error(
+                f"[YouTube] Failed to create playlist "
+                f"(reason={error_reason}, message={error_message})"
+            )
+            if error_content is not None:
+                log.debug(f"[YouTube] Playlist creation full error: {json.dumps(error_content)}")
             return None
         except Exception as e:
-            print(f"[YouTube] Failed to create playlist: {e}")
+            log.error(f"[YouTube] Failed to create playlist with unexpected error: {e}")
             return None
     
     def add_to_playlist(self, video_id: str, playlist_id: str) -> bool:
@@ -388,19 +446,32 @@ class YouTubeUploader:
             
             self.youtube.playlistItems().insert(
                 part="snippet",
-                body=body
+                body=body,
             ).execute()
             
-            print(f"[YouTube] Added video to playlist")
+            log.info(f"[YouTube] Added video to playlist")
             return True
             
         except HttpError as e:
-            error_content = json.loads(e.content.decode())
-            error_reason = error_content.get("error", {}).get("errors", [{}])[0].get("reason", "unknown")
-            print(f"[YouTube] Failed to add video to playlist: {error_reason}")
+            error_reason = "unknown"
+            error_message = str(e)
+            try:
+                error_content = json.loads(e.content.decode())
+                error_info = error_content.get("error", {})
+                error_reason = error_info.get("errors", [{}])[0].get("reason", "unknown")
+                error_message = error_info.get("message", error_message)
+            except Exception:
+                error_content = None
+            
+            log.error(
+                f"[YouTube] Failed to add video to playlist "
+                f"(reason={error_reason}, message={error_message})"
+            )
+            if error_content is not None:
+                log.debug(f"[YouTube] Add-to-playlist full error: {json.dumps(error_content)}")
             return False
         except Exception as e:
-            print(f"[YouTube] Failed to add video to playlist: {e}")
+            log.error(f"[YouTube] Failed to add video to playlist with unexpected error: {e}")
             return False
 
 

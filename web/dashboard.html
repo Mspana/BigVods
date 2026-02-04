@@ -72,6 +72,14 @@
             color: #dc3545;
         }
         
+        .status-low-space {
+            color: #ffc107;
+        }
+        
+        .status-no-space {
+            color: #dc3545;
+        }
+        
         .log-container {
             padding: 20px;
             max-height: 600px;
@@ -161,16 +169,20 @@
                 <div class="value" id="statusValue">Checking...</div>
             </div>
             <div class="status-item">
+                <div class="label">Disk Space</div>
+                <div class="value" id="diskSpace">-</div>
+            </div>
+            <div class="status-item">
+                <div class="label">Total Processed</div>
+                <div class="value" id="totalProcessed">-</div>
+            </div>
+            <div class="status-item">
                 <div class="label">Last Check</div>
                 <div class="value" id="lastCheck">-</div>
             </div>
             <div class="status-item">
                 <div class="label">VODs Today</div>
                 <div class="value" id="vodsToday">-</div>
-            </div>
-            <div class="status-item">
-                <div class="label">Total Processed</div>
-                <div class="value" id="totalProcessed">-</div>
             </div>
         </div>
         
@@ -187,12 +199,14 @@
             <div class="refresh-info">
                 <span id="lastRefresh">Never refreshed</span>
             </div>
-            <div class="auto-refresh">
+            <div class="auto-refresh" style="display: flex; gap: 10px; align-items: center;">
                 <label>
                     <input type="checkbox" id="autoRefresh" checked>
                     Auto-refresh (30s)
                 </label>
-                <button onclick="loadLogs()" style="padding: 8px 16px; margin-left: 10px; cursor: pointer;">Refresh Now</button>
+                <button onclick="loadLogs()" style="padding: 8px 16px; cursor: pointer; border: 1px solid #ddd; border-radius: 4px; background: white;">Refresh Now</button>
+                <a href="authenticate.html" target="_blank" style="padding: 8px 16px; cursor: pointer; border: 1px solid #667eea; border-radius: 4px; background: #667eea; color: white; font-weight: 500; text-decoration: none; display: inline-block;">Authenticate YouTube</a>
+                <button onclick="restartArchiver()" style="padding: 8px 16px; cursor: pointer; border: 1px solid #28a745; border-radius: 4px; background: #28a745; color: white; font-weight: 500;">Restart Archiver</button>
             </div>
         </div>
     </div>
@@ -429,8 +443,53 @@
                 statusEl.className = 'value status-stopped';
             }
             
+            // Update disk space
+            updateDiskSpace();
+            
+            // Update disk space
+            updateDiskSpace();
+            
             // Get total processed count from processed_vods.json
             loadProcessedCount();
+        }
+        
+        async function updateDiskSpace() {
+            try {
+                const response = await fetch('/api/status');
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.disk_space) {
+                        const space = data.disk_space;
+                        const diskEl = document.getElementById('diskSpace');
+                        const freeText = `${space.free_gb.toFixed(1)}GB free`;
+                        
+                        if (space.status === 'OK') {
+                            diskEl.textContent = freeText;
+                            diskEl.className = 'value';
+                        } else if (space.status === 'LOW') {
+                            diskEl.textContent = `⚠ ${freeText}`;
+                            diskEl.className = 'value status-low-space';
+                        } else {
+                            diskEl.textContent = `✗ ${freeText}`;
+                            diskEl.className = 'value status-no-space';
+                        }
+                        
+                        // Update status if out of space
+                        if (!space.has_space) {
+                            const statusEl = document.getElementById('statusValue');
+                            if (statusEl.textContent === 'IDLE/STOPPED') {
+                                statusEl.textContent = 'OUT OF SPACE';
+                                statusEl.className = 'value status-no-space';
+                            } else if (statusEl.textContent === 'RUNNING') {
+                                statusEl.textContent = 'RUNNING (LOW SPACE)';
+                                statusEl.className = 'value status-low-space';
+                            }
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Failed to load disk space:', error);
+            }
         }
         
         function setupAutoRefresh() {
@@ -453,6 +512,50 @@
         // Setup auto-refresh
         document.getElementById('autoRefresh').addEventListener('change', setupAutoRefresh);
         setupAutoRefresh();
+        
+        // Restart archiver function
+        async function restartArchiver() {
+            const button = event.target;
+            const originalText = button.textContent;
+            
+            // Try API first, but have fallback
+            try {
+                const response = await fetch('/api/restart', {
+                    method: 'GET'
+                });
+                
+                if (response.ok) {
+                    const contentType = response.headers.get('content-type');
+                    if (contentType && contentType.includes('application/json')) {
+                        const data = await response.json();
+                        if (data.status === 'success') {
+                            button.textContent = '✓ Restarted';
+                            button.style.background = '#28a745';
+                            alert('Archiver restarted! It will pick up new YouTube credentials on the next check cycle.');
+                            setTimeout(() => {
+                                button.disabled = false;
+                                button.textContent = originalText;
+                                button.style.background = '#28a745';
+                            }, 3000);
+                            return;
+                        }
+                    }
+                }
+            } catch (error) {
+                // Fall through to manual instructions
+            }
+            
+            // Fallback: show instructions
+            const confirmed = confirm('To restart the archiver, run this in PowerShell:\n\nStop-ScheduledTask -TaskName "TwitchVODArchiver"\nStart-ScheduledTask -TaskName "TwitchVODArchiver"\n\nClick OK to copy these commands.');
+            if (confirmed) {
+                const commands = 'Stop-ScheduledTask -TaskName "TwitchVODArchiver"; Start-Sleep -Seconds 2; Start-ScheduledTask -TaskName "TwitchVODArchiver"';
+                navigator.clipboard.writeText(commands).then(() => {
+                    alert('Commands copied to clipboard! Paste them into PowerShell.');
+                }).catch(() => {
+                    alert('Commands:\n\nStop-ScheduledTask -TaskName "TwitchVODArchiver"\nStart-ScheduledTask -TaskName "TwitchVODArchiver"');
+                });
+            }
+        }
     </script>
 </body>
 </html>

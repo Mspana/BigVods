@@ -71,6 +71,41 @@ class VODDownloader:
         self.progress_bar = ProgressBar()
         self.downloaded_file = None
     
+    def get_free_space(self) -> int:
+        """Get free disk space in bytes for the download directory."""
+        import shutil
+        try:
+            stat = shutil.disk_usage(self.download_dir)
+            return stat.free
+        except Exception:
+            return 0
+    
+    def check_disk_space(self, estimated_size: int = None, min_free_gb: float = 5.0) -> tuple[bool, str]:
+        """
+        Check if there's enough disk space for download.
+        
+        Args:
+            estimated_size: Estimated file size in bytes (optional)
+            min_free_gb: Minimum free space to keep in GB
+        
+        Returns:
+            (has_space: bool, message: str)
+        """
+        free_bytes = self.get_free_space()
+        min_free_bytes = int(min_free_gb * 1024 * 1024 * 1024)
+        
+        if free_bytes < min_free_bytes:
+            free_gb = free_bytes / (1024 ** 3)
+            return False, f"Insufficient disk space: {free_gb:.2f}GB free (need at least {min_free_gb}GB)"
+        
+        if estimated_size and free_bytes < estimated_size + min_free_bytes:
+            free_gb = free_bytes / (1024 ** 3)
+            needed_gb = (estimated_size + min_free_bytes) / (1024 ** 3)
+            return False, f"Insufficient disk space: {free_gb:.2f}GB free (need {needed_gb:.2f}GB)"
+        
+        free_gb = free_bytes / (1024 ** 3)
+        return True, f"Disk space OK: {free_gb:.2f}GB free"
+    
     def sanitize_filename(self, title: str) -> str:
         """Remove invalid characters from filename."""
         # Remove characters that are invalid in Windows filenames
@@ -149,6 +184,15 @@ class VODDownloader:
             print(f"[Downloader] Found existing file, skipping download: {existing_file}")
             return existing_file
         
+        # Check disk space before downloading
+        # Estimate: assume VOD could be up to 10GB (conservative estimate for long streams)
+        estimated_max_size = 10 * 1024 * 1024 * 1024  # 10GB
+        has_space, space_msg = self.check_disk_space(estimated_max_size, min_free_gb=5.0)
+        if not has_space:
+            print(f"[Downloader] {space_msg}")
+            return None
+        
+        print(f"[Downloader] {space_msg}")
         print(f"[Downloader] Downloading: {title}")
         print(f"[Downloader] URL: {vod_url}")
         
